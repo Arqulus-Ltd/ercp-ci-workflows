@@ -1,0 +1,32 @@
+# EXAMPLE — lives in a DOMAIN SOURCE repo's .github/workflows/ (e.g. Arqulus-Ltd/ercp-screening),
+# owned by the app team. It calls the shared reusable workflows. Checkout inside each reusable
+# workflow uses the per-job GITHUB_TOKEN, so no source-read credential is ever shared with the
+# platform/DevOps side (guide §5.2). Copy into the domain repo; do not run from ercp-ci-workflows.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  test:
+    uses: Arqulus-Ltd/ercp-ci-workflows/.github/workflows/test.yml@v1
+
+  scan:
+    uses: Arqulus-Ltd/ercp-ci-workflows/.github/workflows/scan.yml@v1
+
+  build-and-push:
+    needs: [test, scan]
+    uses: Arqulus-Ltd/ercp-ci-workflows/.github/workflows/build-and-push.yml@v1
+    with:
+      service: screening-service
+      dockerfile: services/screening-service/Dockerfile
+      # CONFIRM account + ECR repo — placeholder, do not assume this value:
+      image-repo: ACCOUNT.dkr.ecr.eu-west-1.amazonaws.com/ercp/screening-service
+      runner-label: ubuntu-latest
+    secrets:
+      deploy-role-arn: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
