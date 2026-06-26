@@ -39,7 +39,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: develop
+          ref: ${{ inputs.gitops_branch }}
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v5
