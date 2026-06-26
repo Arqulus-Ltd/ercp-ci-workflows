@@ -49,14 +49,15 @@ jobs:
           role-session-name: ${{ inputs.service }}-build
 
       - name: Build & Push Image
-        shell: sh
+        shell: bash
         run: |
           IMAGE_TAG="${{ inputs.service }}-${GITHUB_SHA}"
           IMAGE_URI="${{ inputs.ecr_registry }}/${{ inputs.ecr_repository }}:${IMAGE_TAG}"
 
-          mkdir -p /kaniko/.docker
+          export DOCKER_CONFIG="${GITHUB_WORKSPACE}/.docker"
+          mkdir -p "$DOCKER_CONFIG"
 
-          cat > /kaniko/.docker/config.json <<EOF
+          cat > "$DOCKER_CONFIG/config.json" <<EOF
           {
             "credHelpers": {
               "${{ inputs.ecr_registry }}": "ecr-login"
@@ -69,8 +70,8 @@ jobs:
             --dockerfile "${GITHUB_WORKSPACE}/services/${{ inputs.environment }}/${{ inputs.service }}/Dockerfile" \
             --destination "${IMAGE_URI}"
 
-          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
-          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+          echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
+          echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
 
       - name: Scan Image
         uses: aquasecurity/trivy-action@master
