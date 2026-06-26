@@ -36,7 +36,7 @@ jobs:
     runs-on: nonprod-arc-runner
 
     container:
-      image: gcr.io/kaniko-project/executor:v1.23.2-debug
+      image: 932212589634.dkr.ecr.eu-north-1.amazonaws.com/ercp-images:ci-kaniko-runner-v1
       options: --entrypoint=""
 
     steps:
