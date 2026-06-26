@@ -21,6 +21,10 @@ on:
       shared_role_arn:
         required: true
         type: string
+      gitops_branch:
+        required: false
+        type: string
+        default: develop-19-06-2026
 
 permissions:
   id-token: write
