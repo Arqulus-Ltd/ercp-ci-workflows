@@ -35,38 +35,48 @@ jobs:
   build-scan-push:
     runs-on: nonprod-arc-runner
 
+    container:
+      image: gcr.io/kaniko-project/executor:v1.23.2-debug
+      options: --entrypoint=""
+
     steps:
-      - name: Checkout
+      - name: Checkout GitOps
         uses: actions/checkout@v4
         with:
-          ref: develop
+          ref: ${{ inputs.gitops_branch }}
 
-      - name: Configure AWS credentials
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v5
         with:
           aws-region: ${{ inputs.aws_region }}
           role-to-assume: ${{ inputs.shared_role_arn }}
           role-session-name: ${{ inputs.service }}-build
 
-      - name: Login to ECR
-        run: |
-          aws ecr get-login-password --region ${{ inputs.aws_region }} | \
-          docker login --username AWS --password-stdin ${{ inputs.ecr_registry }}
-
-      - name: Build image
+      - name: Build & Push Image
+        shell: sh
         run: |
           IMAGE_TAG="${{ inputs.service }}-${GITHUB_SHA}"
-          IMAGE_URI="${{ inputs.ecr_registry }}/${{ inputs.ecr_repository }}:$IMAGE_TAG"
+          IMAGE_URI="${{ inputs.ecr_registry }}/${{ inputs.ecr_repository }}:${IMAGE_TAG}"
 
-          docker build \
-            -f services/${{ inputs.environment }}/${{ inputs.service }}/Dockerfile \
-            -t "$IMAGE_URI" \
-            services/${{ inputs.environment }}/${{ inputs.service }}
+          mkdir -p /kaniko/.docker
+
+          cat > /kaniko/.docker/config.json <<EOF
+          {
+            "credHelpers": {
+              "${{ inputs.ecr_registry }}": "ecr-login"
+            }
+          }
+          EOF
+
+          /kaniko/executor \
+            --context "${GITHUB_WORKSPACE}/services/${{ inputs.environment }}/${{ inputs.service }}" \
+            --dockerfile "${GITHUB_WORKSPACE}/services/${{ inputs.environment }}/${{ inputs.service }}/Dockerfile" \
+            --destination "${IMAGE_URI}"
 
           echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
           echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
 
-      - name: Scan image with Trivy
+      - name: Scan Image
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.IMAGE_URI }}
@@ -74,11 +84,8 @@ jobs:
           exit-code: "1"
           severity: CRITICAL,HIGH
 
-      - name: Push image to ECR
-        run: |
-          docker push "$IMAGE_URI"
-
       - name: Update values.yaml
+        shell: bash
         run: |
           VALUES_FILE="services/${{ inputs.environment }}/${{ inputs.service }}/values.yaml"
 
@@ -89,4 +96,5 @@ jobs:
 
           git add "$VALUES_FILE"
           git commit -m "Update ${{ inputs.service }} ${{ inputs.environment }} image to $IMAGE_TAG" || echo "No changes"
+
           git push
