@@ -35,10 +35,6 @@ jobs:
   build-scan-push:
     runs-on: nonprod-arc-runner
 
-    container:
-      image: 932212589634.dkr.ecr.eu-north-1.amazonaws.com/ercp-images:ci-kaniko-runner-v1
-      options: --entrypoint=""
-
     steps:
       - name: Checkout GitOps
         uses: actions/checkout@v4
