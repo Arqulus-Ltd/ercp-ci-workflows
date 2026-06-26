@@ -48,6 +48,25 @@ jobs:
           role-to-assume: ${{ inputs.shared_role_arn }}
           role-session-name: ${{ inputs.service }}-build
 
+      - name: Verify runner image
+        shell: bash
+        run: |
+          echo "User:"
+          whoami
+
+          echo "Kaniko:"
+          ls -l /kaniko || true
+          ls -l /kaniko/executor || true
+
+          echo "First few lines of executor:"
+          head -5 /kaniko/executor || true
+
+          echo "File type:"
+          file /kaniko/executor || true
+
+          echo "AWS:"
+          aws --version
+
       - name: Build & Push Image
         shell: bash
         run: |
