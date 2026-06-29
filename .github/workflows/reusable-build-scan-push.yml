@@ -6,9 +6,6 @@ on:
       service:
         required: true
         type: string
-      environment:
-        required: true
-        type: string
       aws_region:
         required: true
         type: string
@@ -21,14 +18,10 @@ on:
       shared_role_arn:
         required: true
         type: string
-      gitops_branch:
-        required: false
-        type: string
-        default: develop-19-06-2026
 
 permissions:
   id-token: write
-  contents: write
+  contents: read
   security-events: write
 
 jobs:
@@ -36,10 +29,8 @@ jobs:
     runs-on: nonprod-arc-runner
 
     steps:
-      - name: Checkout GitOps
+      - name: Checkout source repo
         uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.gitops_branch }}
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v5
@@ -48,46 +39,20 @@ jobs:
           role-to-assume: ${{ inputs.shared_role_arn }}
           role-session-name: ${{ inputs.service }}-build
 
-      - name: Verify runner image
-        shell: bash
+      - name: Login to ECR
         run: |
-          echo "User:"
-          whoami
+          aws ecr get-login-password --region ${{ inputs.aws_region }} | \
+          docker login --username AWS --password-stdin ${{ inputs.ecr_registry }}
 
-          echo "Kaniko:"
-          ls -l /kaniko || true
-          ls -l /kaniko/executor || true
-
-          echo "First few lines of executor:"
-          head -5 /kaniko/executor || true
-
-          echo "File type:"
-          file /kaniko/executor || true
-
-          echo "AWS:"
-          aws --version
-
-      - name: Build & Push Image
-        shell: bash
+      - name: Build image
         run: |
           IMAGE_TAG="${{ inputs.service }}-${GITHUB_SHA}"
           IMAGE_URI="${{ inputs.ecr_registry }}/${{ inputs.ecr_repository }}:${IMAGE_TAG}"
 
-          export DOCKER_CONFIG="${GITHUB_WORKSPACE}/.docker"
-          mkdir -p "$DOCKER_CONFIG"
-
-          cat > "$DOCKER_CONFIG/config.json" <<EOF
-          {
-            "credHelpers": {
-              "${{ inputs.ecr_registry }}": "ecr-login"
-            }
-          }
-          EOF
-
-          /kaniko/executor \
-            --context "${GITHUB_WORKSPACE}/services/${{ inputs.environment }}/${{ inputs.service }}" \
-            --dockerfile "${GITHUB_WORKSPACE}/services/${{ inputs.environment }}/${{ inputs.service }}/Dockerfile" \
-            --destination "${IMAGE_URI}"
+          docker build \
+            -f services/${{ inputs.service }}/Dockerfile \
+            -t "$IMAGE_URI" \
+            .
 
           echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
           echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
@@ -100,17 +65,6 @@ jobs:
           exit-code: "1"
           severity: CRITICAL,HIGH
 
-      - name: Update values.yaml
-        shell: bash
+      - name: Push image to ECR
         run: |
-          VALUES_FILE="services/${{ inputs.environment }}/${{ inputs.service }}/values.yaml"
-
-          sed -i "s|tag: .*|tag: $IMAGE_TAG|" "$VALUES_FILE"
-
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-
-          git add "$VALUES_FILE"
-          git commit -m "Update ${{ inputs.service }} ${{ inputs.environment }} image to $IMAGE_TAG" || echo "No changes"
-
-          git push
+          docker push "$IMAGE_URI"
