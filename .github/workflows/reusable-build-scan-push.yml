@@ -118,7 +118,7 @@ jobs:
 
       - name: Update GitOps values
         run: |
-          VALUES_FILE="ercp-gitops/environments/${{ inputs.environment }}/values.${{ inputs.service }}.yaml"
+          VALUES_FILE="ercp-gitops/services/${{ inputs.environment }}/${{ inputs.service }}/values.yaml"
 
           if [ ! -f "$VALUES_FILE" ]; then
             echo "ERROR: $VALUES_FILE not found"
@@ -128,17 +128,20 @@ jobs:
           sed -i "s|repository: .*|repository: ${{ inputs.ecr_registry }}/${{ inputs.ecr_repository }}|" "$VALUES_FILE"
           sed -i "s|digest: .*|digest: \"${{ steps.digest.outputs.digest }}\"|" "$VALUES_FILE"
 
+          echo "Updated $VALUES_FILE"
+          cat "$VALUES_FILE"
+
       - name: Create GitOps PR
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ steps.app-token.outputs.token }}
           path: ercp-gitops
-          branch: update-${{ inputs.service }}-${{ github.sha }}
+          branch: update-${{ inputs.environment }}-${{ inputs.service }}-${{ github.sha }}
           base: ${{ inputs.gitops_branch }}
-          title: "Update ${{ inputs.service }} image digest"
-          commit-message: "Update ${{ inputs.service }} image digest"
+          title: "Update ${{ inputs.environment }}/${{ inputs.service }} image digest"
+          commit-message: "Update ${{ inputs.environment }}/${{ inputs.service }} image digest"
           body: |
-            Updated image digest for `${{ inputs.service }}`.
+            Updated image digest for `${{ inputs.environment }}/${{ inputs.service }}`.
 
             Digest:
             `${{ steps.digest.outputs.digest }}`
