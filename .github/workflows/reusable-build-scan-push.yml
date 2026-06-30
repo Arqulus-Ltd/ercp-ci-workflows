@@ -6,6 +6,9 @@ on:
       service:
         required: true
         type: string
+      environment:
+        required: true
+        type: string
       aws_region:
         required: true
         type: string
@@ -15,8 +18,18 @@ on:
       ecr_repository:
         required: true
         type: string
+      gitops_repo:
+        required: true
+        type: string
+      gitops_branch:
+        required: true
+        type: string
     secrets:
       shared_role_arn:
+        required: true
+      gitops_app_id:
+        required: true
+      gitops_app_private_key:
         required: true
     outputs:
       digest:
@@ -71,8 +84,7 @@ jobs:
           severity: CRITICAL,HIGH
 
       - name: Push image to ECR
-        run: |
-          docker push "$IMAGE_URI"
+        run: docker push "$IMAGE_URI"
 
       - name: Get image digest
         id: digest
@@ -86,3 +98,47 @@ jobs:
 
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "Pushed digest: $DIGEST"
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.gitops_app_id }}
+          private-key: ${{ secrets.gitops_app_private_key }}
+          owner: Arqulus-Ltd
+          repositories: ercp-gitops
+
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.gitops_repo }}
+          ref: ${{ inputs.gitops_branch }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: ercp-gitops
+
+      - name: Update GitOps values
+        run: |
+          VALUES_FILE="ercp-gitops/environments/${{ inputs.environment }}/values.${{ inputs.service }}.yaml"
+
+          if [ ! -f "$VALUES_FILE" ]; then
+            echo "ERROR: $VALUES_FILE not found"
+            exit 1
+          fi
+
+          sed -i "s|repository: .*|repository: ${{ inputs.ecr_registry }}/${{ inputs.ecr_repository }}|" "$VALUES_FILE"
+          sed -i "s|digest: .*|digest: \"${{ steps.digest.outputs.digest }}\"|" "$VALUES_FILE"
+
+      - name: Create GitOps PR
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          path: ercp-gitops
+          branch: update-${{ inputs.service }}-${{ github.sha }}
+          base: ${{ inputs.gitops_branch }}
+          title: "Update ${{ inputs.service }} image digest"
+          commit-message: "Update ${{ inputs.service }} image digest"
+          body: |
+            Updated image digest for `${{ inputs.service }}`.
+
+            Digest:
+            `${{ steps.digest.outputs.digest }}`
