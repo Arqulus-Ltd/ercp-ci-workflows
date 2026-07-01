@@ -46,7 +46,7 @@ permissions:
 
 jobs:
   build-scan-push:
-    runs-on: nonprod-arc-runner
+    runs-on: ubuntu-latest
     outputs:
       digest: ${{ steps.digest.outputs.digest }}
 
