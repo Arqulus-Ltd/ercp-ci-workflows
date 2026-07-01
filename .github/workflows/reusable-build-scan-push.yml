@@ -6,6 +6,10 @@ on:
       service:
         required: true
         type: string
+      gitops_service_dir:
+        required: false
+        type: string
+        default: ""
       environment:
         required: true
         type: string
@@ -118,7 +122,13 @@ jobs:
 
       - name: Update GitOps values
         run: |
-          VALUES_FILE="ercp-gitops/services/${{ inputs.environment }}/${{ inputs.service }}/values.yaml"
+          GITOPS_SERVICE_DIR="${{ inputs.gitops_service_dir }}"
+
+          if [ -z "$GITOPS_SERVICE_DIR" ]; then
+            GITOPS_SERVICE_DIR="${{ inputs.service }}"
+          fi
+
+          VALUES_FILE="ercp-gitops/services/${{ inputs.environment }}/${GITOPS_SERVICE_DIR}/values.yaml"
 
           if [ ! -f "$VALUES_FILE" ]; then
             echo "ERROR: $VALUES_FILE not found"
@@ -128,6 +138,7 @@ jobs:
           sed -i "s|repository: .*|repository: ${{ inputs.ecr_registry }}/${{ inputs.ecr_repository }}|" "$VALUES_FILE"
           sed -i "s|digest: .*|digest: \"${{ steps.digest.outputs.digest }}\"|" "$VALUES_FILE"
 
+          echo "GITOPS_SERVICE_DIR=$GITOPS_SERVICE_DIR" >> "$GITHUB_ENV"
           echo "Updated $VALUES_FILE"
           cat "$VALUES_FILE"
 
@@ -136,12 +147,15 @@ jobs:
         with:
           token: ${{ steps.app-token.outputs.token }}
           path: ercp-gitops
-          branch: update-${{ inputs.environment }}-${{ inputs.service }}-${{ github.sha }}
+          branch: update-${{ inputs.environment }}-${{ env.GITOPS_SERVICE_DIR }}-${{ github.sha }}
           base: ${{ inputs.gitops_branch }}
-          title: "Update ${{ inputs.environment }}/${{ inputs.service }} image digest"
-          commit-message: "Update ${{ inputs.environment }}/${{ inputs.service }} image digest"
+          title: "Update ${{ inputs.environment }}/${{ env.GITOPS_SERVICE_DIR }} image digest"
+          commit-message: "Update ${{ inputs.environment }}/${{ env.GITOPS_SERVICE_DIR }} image digest"
           body: |
-            Updated image digest for `${{ inputs.environment }}/${{ inputs.service }}`.
+            Updated image digest for `${{ inputs.environment }}/${{ env.GITOPS_SERVICE_DIR }}`.
+
+            Source service:
+            `${{ inputs.service }}`
 
             Digest:
             `${{ steps.digest.outputs.digest }}`
