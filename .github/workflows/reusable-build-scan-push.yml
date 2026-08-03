@@ -36,22 +36,74 @@ on:
         required: true
     outputs:
       digest:
+        description: Pushed ECR image digest
         value: ${{ jobs.build-scan-push.outputs.digest }}
 
 permissions:
   id-token: write
   contents: read
-  security-events: write
 
 jobs:
   build-scan-push:
+    name: Build, scan, push, and update GitOps
     runs-on: ubuntu-latest
     outputs:
       digest: ${{ steps.digest.outputs.digest }}
 
     steps:
-      - name: Checkout source repo
+      - name: Checkout source repository
         uses: actions/checkout@v4
+
+      - name: Validate workflow inputs
+        env:
+          INPUT_SERVICE: ${{ inputs.service }}
+          INPUT_VALUES_PATH: ${{ inputs.values_path }}
+          INPUT_ENVIRONMENT: ${{ inputs.environment }}
+          INPUT_AWS_REGION: ${{ inputs.aws_region }}
+          INPUT_ECR_REGISTRY: ${{ inputs.ecr_registry }}
+          INPUT_ECR_REPOSITORY: ${{ inputs.ecr_repository }}
+          INPUT_GITOPS_REPO: ${{ inputs.gitops_repo }}
+          INPUT_GITOPS_BRANCH: ${{ inputs.gitops_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          fail() {
+            echo "::error::$1"
+            exit 1
+          }
+
+          [[ "$INPUT_SERVICE" =~ ^[a-z0-9][a-z0-9-]*$ ]] ||
+            fail "Invalid service: $INPUT_SERVICE"
+
+          [[ "$INPUT_ENVIRONMENT" =~ ^(dev|test|stage|staging|prod|production)$ ]] ||
+            fail "Invalid environment: $INPUT_ENVIRONMENT"
+
+          [[ "$INPUT_VALUES_PATH" =~ ^services/(dev|test|stage|staging|prod|production)/[a-z0-9][a-z0-9-]*/values\.ya?ml$ ]] ||
+            fail "Invalid values_path: $INPUT_VALUES_PATH"
+
+          [[ "$INPUT_AWS_REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]$ ]] ||
+            fail "Invalid AWS region: $INPUT_AWS_REGION"
+
+          [[ "$INPUT_ECR_REGISTRY" =~ ^[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com$ ]] ||
+            fail "Invalid ECR registry: $INPUT_ECR_REGISTRY"
+
+          [[ "$INPUT_ECR_REPOSITORY" =~ ^[a-z0-9]+([._/-][a-z0-9]+)*$ ]] ||
+            fail "Invalid ECR repository: $INPUT_ECR_REPOSITORY"
+
+          [[ "$INPUT_GITOPS_REPO" =~ ^Arqulus-Ltd/[A-Za-z0-9._-]+$ ]] ||
+            fail "Invalid GitOps repository: $INPUT_GITOPS_REPO"
+
+          [[ "$INPUT_GITOPS_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] ||
+            fail "Invalid GitOps branch: $INPUT_GITOPS_BRANCH"
+
+          case "$INPUT_VALUES_PATH" in
+            services/"$INPUT_ENVIRONMENT"/*/values.yaml|services/"$INPUT_ENVIRONMENT"/*/values.yml)
+              ;;
+            *)
+              fail "values_path environment does not match environment input"
+              ;;
+          esac
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v5
@@ -61,43 +113,84 @@ jobs:
           role-session-name: ${{ inputs.service }}-build
 
       - name: Login to ECR
+        env:
+          AWS_REGION_INPUT: ${{ inputs.aws_region }}
+          ECR_REGISTRY_INPUT: ${{ inputs.ecr_registry }}
+        shell: bash
         run: |
-          aws ecr get-login-password --region ${{ inputs.aws_region }} | \
-          docker login --username AWS --password-stdin ${{ inputs.ecr_registry }}
+          set -euo pipefail
+
+          aws ecr get-login-password \
+            --region "$AWS_REGION_INPUT" |
+            docker login \
+              --username AWS \
+              --password-stdin "$ECR_REGISTRY_INPUT"
 
       - name: Build image
+        env:
+          SERVICE_INPUT: ${{ inputs.service }}
+          ECR_REGISTRY_INPUT: ${{ inputs.ecr_registry }}
+          ECR_REPOSITORY_INPUT: ${{ inputs.ecr_repository }}
+        shell: bash
         run: |
-          IMAGE_TAG="${{ inputs.service }}-${GITHUB_SHA}"
-          IMAGE_URI="${{ inputs.ecr_registry }}/${{ inputs.ecr_repository }}:${IMAGE_TAG}"
+          set -euo pipefail
+
+          DOCKERFILE="services/${SERVICE_INPUT}/Dockerfile"
+          IMAGE_TAG="${SERVICE_INPUT}-${GITHUB_SHA}"
+          IMAGE_URI="${ECR_REGISTRY_INPUT}/${ECR_REPOSITORY_INPUT}:${IMAGE_TAG}"
+
+          if [[ ! -f "$DOCKERFILE" ]]; then
+            echo "::error::Dockerfile not found: $DOCKERFILE"
+            exit 1
+          fi
 
           docker build \
-            -f services/${{ inputs.service }}/Dockerfile \
-            -t "$IMAGE_URI" \
+            --file "$DOCKERFILE" \
+            --tag "$IMAGE_URI" \
             .
 
-          echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
-          echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
+          {
+            echo "IMAGE_TAG=$IMAGE_TAG"
+            echo "IMAGE_URI=$IMAGE_URI"
+          } >> "$GITHUB_ENV"
 
       - name: Scan image
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.IMAGE_URI }}
           format: table
           exit-code: "1"
+          ignore-unfixed: true
           severity: CRITICAL,HIGH
 
       - name: Push image to ECR
-        run: docker push "$IMAGE_URI"
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE_URI"
 
       - name: Get image digest
         id: digest
+        env:
+          AWS_REGION_INPUT: ${{ inputs.aws_region }}
+          ECR_REPOSITORY_INPUT: ${{ inputs.ecr_repository }}
+        shell: bash
         run: |
-          DIGEST=$(aws ecr describe-images \
-            --repository-name ${{ inputs.ecr_repository }} \
-            --image-ids imageTag="$IMAGE_TAG" \
-            --region ${{ inputs.aws_region }} \
-            --query 'imageDetails[0].imageDigest' \
-            --output text)
+          set -euo pipefail
+
+          DIGEST="$(
+            aws ecr describe-images \
+              --repository-name "$ECR_REPOSITORY_INPUT" \
+              --image-ids "imageTag=$IMAGE_TAG" \
+              --region "$AWS_REGION_INPUT" \
+              --query 'imageDetails[0].imageDigest' \
+              --output text
+          )"
+
+          if [[ -z "$DIGEST" || "$DIGEST" == "None" || ! "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo "::error::Unable to resolve a valid ECR image digest"
+            exit 1
+          fi
 
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "Pushed digest: $DIGEST"
@@ -111,7 +204,7 @@ jobs:
           owner: Arqulus-Ltd
           repositories: ercp-gitops
 
-      - name: Checkout GitOps repo
+      - name: Checkout GitOps repository
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.gitops_repo }}
@@ -120,22 +213,70 @@ jobs:
           path: ercp-gitops
 
       - name: Update GitOps values
+        env:
+          VALUES_PATH_INPUT: ${{ inputs.values_path }}
+          ECR_REGISTRY_INPUT: ${{ inputs.ecr_registry }}
+          ECR_REPOSITORY_INPUT: ${{ inputs.ecr_repository }}
+          IMAGE_DIGEST: ${{ steps.digest.outputs.digest }}
+        shell: bash
         run: |
-          VALUES_FILE="ercp-gitops/${{ inputs.values_path }}"
+          set -euo pipefail
 
-          if [ ! -f "$VALUES_FILE" ]; then
-            echo "ERROR: $VALUES_FILE not found"
+          VALUES_FILE="ercp-gitops/${VALUES_PATH_INPUT}"
+          IMAGE_REPOSITORY="${ECR_REGISTRY_INPUT}/${ECR_REPOSITORY_INPUT}"
+
+          if [[ ! -f "$VALUES_FILE" ]]; then
+            echo "::error::Values file not found: $VALUES_FILE"
             exit 1
           fi
 
-          sed -i "s|repository: .*|repository: ${{ inputs.ecr_registry }}/${{ inputs.ecr_repository }}|" "$VALUES_FILE"
-          sed -i "s|digest: .*|digest: \"${{ steps.digest.outputs.digest }}\"|" "$VALUES_FILE"
+          python3 - "$VALUES_FILE" "$IMAGE_REPOSITORY" "$IMAGE_DIGEST" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
 
-          echo "VALUES_PATH=${{ inputs.values_path }}" >> "$GITHUB_ENV"
+          values_file = Path(sys.argv[1])
+          repository = sys.argv[2]
+          digest = sys.argv[3]
+
+          text = values_file.read_text(encoding="utf-8")
+
+          updated_text, repository_count = re.subn(
+              r"(?m)^(\s*)repository:\s*.*$",
+              lambda match: f"{match.group(1)}repository: {repository}",
+              text,
+              count=1,
+          )
+
+          updated_text, digest_count = re.subn(
+              r'(?m)^(\s*)digest:\s*.*$',
+              lambda match: f'{match.group(1)}digest: "{digest}"',
+              updated_text,
+              count=1,
+          )
+
+          if repository_count != 1:
+              raise SystemExit(
+                  f"Expected exactly one repository field, updated {repository_count}"
+              )
+
+          if digest_count != 1:
+              raise SystemExit(
+                  f"Expected exactly one digest field, updated {digest_count}"
+              )
+
+          values_file.write_text(updated_text, encoding="utf-8")
+          PY
+
+          {
+            echo "VALUES_PATH=$VALUES_PATH_INPUT"
+            echo "IMAGE_REPOSITORY=$IMAGE_REPOSITORY"
+          } >> "$GITHUB_ENV"
+
           echo "Updated $VALUES_FILE"
-          cat "$VALUES_FILE"
+          grep -E '^[[:space:]]*(repository|digest):' "$VALUES_FILE"
 
-      - name: Create GitOps PR
+      - name: Create GitOps pull request
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ steps.app-token.outputs.token }}
