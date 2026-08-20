@@ -2,7 +2,7 @@
 
 **For:** DevOps / platform-devops. **Date:** 2026-08-20. **Trigger:** demo identity DB migration failed at container init with `exec: "/atlas": stat /atlas: no such file or directory`.
 
-This note explains **what is changing and why**. It is not a line-by-line diff — the migrate change is already implemented (app PR #652); the service-image change is described here for platform-devops to implement in the reusable CI workflow they own.
+This note explains **what is changing and why**, and is self-contained — everything DevOps needs is here or in ECR. It is not a line-by-line diff. The migrate image is already fixed and published; the service-image change is described here for platform-devops to implement in the reusable CI workflow in this repo.
 
 ---
 
@@ -22,8 +22,10 @@ Two build paths are affected:
 
 | Build path | Owner | Status |
 |---|---|---|
-| **Migrate image** (`Dockerfile.migrate` + `build-push-migrate.yml`, in the app repo) | App/Architecture | **Done** — app PR #652. Multi-arch image already in ECR. |
-| **Service images** (all 15 services + identity, built via the reusable workflow in `ercp-ci-workflows`) | platform-devops | **To do** — same change, described in §4. |
+| **Migrate image** (built from the app repo) | App/Architecture | **Done.** Multi-arch image published to ECR — digest `sha256:66c1975ba062bcf81fe4b806a2f8eb4e38bddc635a6ec9eb3f9bb6fe6feff4f0` (tag `migrate-53a04d4c`). Repoint the demo migrate Job(s) to this digest and re-run. |
+| **Service images** (all 15 services + identity, built via the reusable workflow **in this repo**) | platform-devops | **To do** — same change, described in §4. |
+
+The migrate build lives in the app repo (not accessible to DevOps), but nothing about it is needed here beyond the **digest above**, which is already in the shared ECR registry. Merging the migrate build change is App/Architecture's task; it does not block DevOps.
 
 ## 3. Why it is done this way
 
@@ -35,7 +37,7 @@ Two build paths are affected:
 
 ## 4. Scope of the service-image change (platform-devops)
 
-The service build logic lives in **one** reusable workflow in `ercp-ci-workflows`, which both the 15-service caller and the identity caller invoke. So this is **a single change that fixes every service at once**, not fifteen changes.
+The service build logic lives in **one** reusable workflow in this repo, which both the 15-service caller and the identity caller invoke. So this is **a single change that fixes every service at once**, not fifteen changes.
 
 Conceptually, the reusable workflow needs to:
 1. **Enable emulated multi-arch building** on the runner (add the standard QEMU + Buildx setup at the top of the job).
@@ -43,7 +45,16 @@ Conceptually, the reusable workflow needs to:
 3. **Keep the scan as a gate before publication** — build the amd64 variant locally first, scan it, and only then produce and push the multi-arch manifest.
 4. **Leave the digest capture and GitOps write-back untouched** — they already resolve the manifest-list digest by tag.
 
-The app-repo migrate workflow (PR #652) is the working reference implementation of exactly this sequence; the service change mirrors it.
+### Reference sequence (as implemented for the migrate image)
+
+This is the exact flow already proven on the migrate image, described so it can be reproduced here without needing the app repo:
+
+1. At the top of the build job, add the two standard setup steps — **QEMU** (for cross-arch emulation) and **Buildx** (the extended builder).
+2. **Build the amd64 variant locally** (loaded into the runner's Docker) and run the **vulnerability scan** against it. This keeps the scan as a gate before anything is pushed.
+3. **Build both architectures together and push them as a single manifest list** to ECR in one step. The builder produces both variants (the arm64 one under emulation) and pushes the combined manifest; the old separate `docker push` step is no longer needed.
+4. **Read the pushed digest back from the registry by tag** exactly as today — it now returns the manifest-list digest — and write it into GitOps unchanged.
+
+Additionally, if a service's entrypoint is a third-party binary, add a one-line build-time step that executes that binary during the build; under the multi-arch build it runs once per architecture, so a base missing the binary on either arch fails the build instead of a cluster.
 
 ## 5. Impact, risks, and what to watch
 
@@ -54,9 +65,9 @@ The app-repo migrate workflow (PR #652) is the working reference implementation 
 
 ## 6. Verification
 
-- **Migrate (done):** the multi-arch build succeeded, which means the per-arch entrypoint assertion passed on **both** amd64 and arm64 — proof the image now runs on either node. The demo migration Job should be repointed to the new multi-arch digest and re-run; it will schedule on any node.
+- **Migrate (done):** the multi-arch build succeeded, which means the per-arch entrypoint assertion passed on **both** amd64 and arm64 — proof the image now runs on either node. Repoint the demo migration Job to the multi-arch digest in §2 and re-run; it will schedule on any node.
 - **Services (after the change):** for each service, the first multi-arch build either succeeds (publishes a dual-arch manifest) or fails loudly on an arch-pinned Dockerfile step. Confirm a couple of representative services pull and run on an arm64 node before treating the fleet as arch-portable.
 
 ---
 
-**Bottom line:** the failure was an architecture mismatch, not a missing code fix. The estate is moving to multi-architecture images so one digest runs on both amd64 and arm64 nodes. Migrate is fixed and verified (PR #652); the identical change to the DevOps-owned reusable service-build workflow fixes all services at once. Deployment mechanics don't change; the main thing to watch is that each service's Dockerfile can actually build for arm64.
+**Bottom line:** the failure was an architecture mismatch, not a missing code fix. The estate is moving to multi-architecture images so one digest runs on both amd64 and arm64 nodes. The migrate image is fixed and its multi-arch build is in ECR (digest in §2); the identical change to the reusable service-build workflow in this repo fixes all services at once. Deployment mechanics don't change; the main thing to watch is that each service's Dockerfile can actually build for arm64.
